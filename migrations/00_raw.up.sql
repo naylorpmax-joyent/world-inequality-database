@@ -43,6 +43,4 @@ CREATE TABLE IF NOT EXISTS data (
     value FLOAT(20),
     age INT,
     pop CHAR(1)
-
-    -- ,FOREIGN KEY fk_raw_data_country_variable (country, variable) REFERENCES metadata (country, variable)
 );

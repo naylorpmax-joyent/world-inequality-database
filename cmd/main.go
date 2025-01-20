@@ -17,6 +17,28 @@ import (
 )
 
 func main() {
+	databaseFlag := &cli.StringFlag{
+		Name:  "database",
+		Value: "raw",
+		Usage: "database to connect to",
+	}
+	deltaFlag := &cli.IntFlag{
+		Name:  "delta",
+		Value: 0,
+		Usage: "number of schema migrations to perform (delta > 0 will upgrade, delta < 0 will downgrade)",
+	}
+
+	verboseFlag := &cli.BoolFlag{
+		Name:  "verbose",
+		Value: false,
+		Usage: "enable verbose logging for debugging (true or false)",
+	}
+	enableDBLogsFlag := &cli.BoolFlag{
+		Name:  "enable-db-logs",
+		Value: false,
+		Usage: "enable db logs for debugging (true or false)",
+	}
+
 	timeoutFlag := &cli.DurationFlag{
 		Name:  "ping-timeout",
 		Value: db.PingTimeout,
@@ -28,29 +50,19 @@ func main() {
 		Usage: "interval between attempts to establish the initial database connection (seconds)",
 	}
 
-	enableDBLogsFlag := &cli.BoolFlag{
-		Name:  "enable-db-logs",
-		Value: false,
-		Usage: "enable db logs for debugging (true or false)",
-	}
-
-	verboseFlag := &cli.BoolFlag{
-		Name:  "verbose",
-		Value: false,
-		Usage: "enable verbose logging for debugging (true or false)",
-	}
-
 	cmd := &cli.Command{
 		Name: "a World Inequality Database CLI",
 		Commands: []*cli.Command{
 			{
 				Name:  "migrate",
 				Usage: "apply migrations to database",
-				Flags: []cli.Flag{timeoutFlag, intervalFlag, enableDBLogsFlag, verboseFlag},
+				Flags: []cli.Flag{databaseFlag, timeoutFlag, intervalFlag, enableDBLogsFlag, verboseFlag},
 				Commands: []*cli.Command{
 					{
 						Name: "up",
 						Action: func(ctx context.Context, c *cli.Command) error {
+							database := c.String("database")
+
 							pingTimeout := c.Duration("ping-timeout")
 							if pingTimeout > 0 {
 								db.PingTimeout = pingTimeout
@@ -62,9 +74,10 @@ func main() {
 
 							verbose := c.Bool("verbose")
 							logger := logger(verbose)
+							defer logger.Sync()
 
 							enableDBLogs := c.Bool("enable-db-logs")
-							db, err := db.Connect(ctx, logger, "raw", enableDBLogs)
+							db, err := db.Connect(ctx, logger, database, enableDBLogs)
 							if err != nil {
 								return err
 							}
@@ -80,6 +93,8 @@ func main() {
 					{
 						Name: "down",
 						Action: func(ctx context.Context, c *cli.Command) error {
+							database := c.String("database")
+
 							pingTimeout := c.Duration("ping-timeout")
 							if pingTimeout > 0 {
 								db.PingTimeout = pingTimeout
@@ -91,9 +106,10 @@ func main() {
 
 							verbose := c.Bool("verbose")
 							logger := logger(verbose)
+							defer logger.Sync()
 
 							enableDBLogs := c.Bool("enable-db-logs")
-							db, err := db.Connect(ctx, logger, "raw", enableDBLogs)
+							db, err := db.Connect(ctx, logger, database, enableDBLogs)
 							if err != nil {
 								return err
 							}
@@ -106,21 +122,17 @@ func main() {
 							return m.Down(ctx)
 						},
 					},
-				},
-			},
-			{
-				Name:  "load",
-				Usage: "load data into the database",
-				Commands: []*cli.Command{
 					{
-						Name: "raw",
+						Name:  "step",
+						Flags: []cli.Flag{deltaFlag},
 						Action: func(ctx context.Context, c *cli.Command) error {
-							// configure loader
+							database := c.String("database")
+							delta := int(c.Int("delta"))
+
 							pingTimeout := c.Duration("ping-timeout")
 							if pingTimeout > 0 {
 								db.PingTimeout = pingTimeout
 							}
-
 							pingInterval := c.Duration("ping-interval")
 							if pingInterval > 0 {
 								db.PingInterval = pingInterval
@@ -128,47 +140,60 @@ func main() {
 
 							verbose := c.Bool("verbose")
 							logger := logger(verbose)
+							defer logger.Sync()
 
 							enableDBLogs := c.Bool("enable-db-logs")
-							db, err := db.Connect(ctx, logger, "raw", enableDBLogs)
+							db, err := db.Connect(ctx, logger, database, enableDBLogs)
 							if err != nil {
 								return err
 							}
 
-							loader := load.New(db, logger)
-
-							// `countries` file
-							if err := loader.Load(ctx, "country", "./data/WID_countries.csv", 5); err != nil {
-								return err
-							}
-
-							logger.Infof("loaded countries")
-
-							// `metadata` files
-							metadata, err := listDirByPrefix("./data", "WID_metadata")
-							if err != nil {
-								return err
-							}
-							if err := loader.LoadConcurrent(ctx, "metadata", metadata, 19); err != nil {
-								return err
-							}
-
-							logger.Infof("loaded metadata")
-
-							// `data` files
-							data, err := listDirByPrefix("./data", "WID_data")
+							m, err := migrate.New(db, logger)
 							if err != nil {
 								return err
 							}
 
-							if err := loader.LoadConcurrent(ctx, "data", data, 7); err != nil {
-								return err
-							}
-
-							logger.Infof("done")
-							return nil
+							return m.Steps(ctx, delta)
 						},
 					},
+				},
+			},
+			{
+				Name:  "load",
+				Usage: "load data into the database",
+				Action: func(ctx context.Context, c *cli.Command) error {
+					// configure loader
+					database := c.String("database")
+
+					pingTimeout := c.Duration("ping-timeout")
+					if pingTimeout > 0 {
+						db.PingTimeout = pingTimeout
+					}
+
+					pingInterval := c.Duration("ping-interval")
+					if pingInterval > 0 {
+						db.PingInterval = pingInterval
+					}
+
+					verbose := c.Bool("verbose")
+					logger := logger(verbose)
+
+					enableDBLogs := c.Bool("enable-db-logs")
+					db, err := db.Connect(ctx, logger, database, enableDBLogs)
+					if err != nil {
+						return err
+					}
+
+					loader := load.New(db, logger)
+					switch database {
+					case "raw":
+						if err := loadRaw(ctx, loader, logger); err != nil {
+							return err
+						}
+					}
+
+					logger.Infof("data loaded!")
+					return nil
 				},
 			},
 		},
@@ -195,6 +220,34 @@ func logger(verbose bool) *zap.SugaredLogger {
 	}
 
 	return l.Sugar()
+}
+
+func loadRaw(ctx context.Context, loader *load.Loader, logger *zap.SugaredLogger) error {
+	// `countries` file
+	if err := loader.Load(ctx, "country", "./data/WID_countries.csv", 5); err != nil {
+		return err
+	}
+
+	logger.Infof("loaded countries")
+
+	// `metadata` files
+	metadata, err := listDirByPrefix("./data", "WID_metadata")
+	if err != nil {
+		return err
+	}
+	if err := loader.LoadConcurrent(ctx, "metadata", metadata, 19); err != nil {
+		return err
+	}
+
+	logger.Infof("loaded metadata")
+
+	// `data` files
+	data, err := listDirByPrefix("./data", "WID_data")
+	if err != nil {
+		return err
+	}
+
+	return loader.LoadConcurrent(ctx, "data", data, 7)
 }
 
 func listDirByPrefix(dir, prefix string) ([]string, error) {

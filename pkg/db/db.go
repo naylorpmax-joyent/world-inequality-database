@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,6 +16,8 @@ import (
 )
 
 var (
+	UnknownDatabaseErr uint16 = 1049
+
 	PingTimeout  = 5 * time.Second
 	PingInterval = 300 * time.Millisecond
 )
@@ -35,7 +38,7 @@ type config struct {
 }
 
 func Connect(ctx context.Context, logger *zap.SugaredLogger, database string, enableDBLogs bool) (*DB, error) {
-	logger.Debug("configuring the database connection")
+	logger.Debug("configuring database connection")
 
 	k := koanf.New(".")
 	if err := k.Load(env.Provider("WID_", "_", cleanEnv), nil); err != nil {
@@ -57,11 +60,11 @@ func Connect(ctx context.Context, logger *zap.SugaredLogger, database string, en
 	}
 
 	// connect to the database
-	db.Debugf("connecting to the database (%d, %d)", PingTimeout, PingInterval)
+	db.Debugf("connecting to database (%d, %d)", PingTimeout, PingInterval)
 
 	dbx, err := db.connect(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error pinging database: %w", err)
+		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
 	db.DB = dbx
 
@@ -69,7 +72,8 @@ func Connect(ctx context.Context, logger *zap.SugaredLogger, database string, en
 }
 
 func (c *DB) connect(ctx context.Context) (*sqlx.DB, error) {
-	dbx := make(chan *sqlx.DB, 1)
+	dbxCh := make(chan *sqlx.DB, 1)
+	errCh := make(chan error, 1)
 
 	go func() {
 		var (
@@ -84,22 +88,27 @@ func (c *DB) connect(ctx context.Context) (*sqlx.DB, error) {
 			// try to open the database connection if we haven't been able to yet
 			if db == nil {
 				db, err = sql.Open("mysql", c.ConnString())
+
 				if err != nil {
-					c.Debugf("error opening database connection:", err)
-				}
-				if err != nil {
+					c.Debugf("error opening database connection: %v", err)
 					continue
 				}
 			}
+
 			// ping the database once we have a connection
 			err := db.PingContext(ctx)
-			if err != nil {
-				c.Debugf("error pinging context", err)
-			}
-			if err == nil {
-				dbx <- sqlx.NewDb(db, "mysql")
+			var mysqlErr *mysql.MySQLError
+			if errors.As(err, &mysqlErr) && mysqlErr.Number == UnknownDatabaseErr {
+				errCh <- fmt.Errorf("database %s does not exist", c.database)
 				return
 			}
+			if err != nil {
+				c.Debugf("error pinging database: %v", err)
+				continue
+			}
+
+			dbxCh <- sqlx.NewDb(db, "mysql")
+			return
 		}
 	}()
 
@@ -107,8 +116,10 @@ func (c *DB) connect(ctx context.Context) (*sqlx.DB, error) {
 
 	select {
 	case <-time.After(PingTimeout):
-		return nil, fmt.Errorf("timed out pinging database after %d", PingTimeout)
-	case db := <-dbx:
+		return nil, fmt.Errorf("timed out pinging database %s after %d", c.database, PingTimeout)
+	case err := <-errCh:
+		return nil, err
+	case db := <-dbxCh:
 		return db, nil
 	}
 }
