@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS raw.data;
+DROP TABLE IF EXISTS raw.metadata;
+DROP TABLE IF EXISTS raw.country;

@@ -1,0 +1,30 @@
+services:
+  db:
+    # name: db-wid
+    image: mariadb:10.11
+    environment:
+      MARIADB_ROOT_PASSWORD: ${WID_DB_PASS}
+      MARIADB_DATABASE: raw
+    ports:
+    - ${WID_DB_PORT}:${WID_DB_PORT}
+    volumes:
+    - db-wid:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "admin" ,"ping", "-h", "localhost", "--password=${WID_DB_PASS}"]
+      start_period: 1m
+      start_interval: 10s
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
+  # TODO
+  # migrate:
+  #   command: ["./wait-for-it/wait-for-it.sh", "mysql:3306", "--", "npm", "run", "migrate"]
+  #   links:
+  #     - mysql
+  #   depends_on:
+  #     - mysql
+
+volumes:
+  db-wid:
+    driver: local
